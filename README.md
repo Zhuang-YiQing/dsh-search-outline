@@ -35,6 +35,14 @@ DSH（DeepSeek Harness）右栏 **文件预览增强**插件：形态和 code-na
 前置：DSH Desktop（或 `dsh web`）已在跑，profile 名为 `desktop`，且已装 **dsh-better-sidebar**
 （本插件的预览器挂在他的 `ctx.betterSidebar` 服务上，没有它时插件静默不生效）。
 
+### 方式 0：从 GitHub 克隆（推荐）
+
+```powershell
+git clone git@github.com:Zhuang-YiQing/dsh-search-outline.git D:/dsh/myplugin/dsh-search-outline
+cd D:/dsh/myplugin/dsh-search-outline
+pwsh -File scripts/install.ps1
+```
+
 ### 方式 A：脚本（推荐，幂等）
 
 ```powershell
@@ -121,6 +129,7 @@ node test/plugin.test.mjs
 
 > 在 DSH 沙箱里请**直接跑这几个文件**，不要用 `node --test`：测试运行器会 spawn 子进程并用管道收输出，
 > 沙箱下会 `EPERM`。普通终端里 `npm test` 也可以。
+
 
 
 
