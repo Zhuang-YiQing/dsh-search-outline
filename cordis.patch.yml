@@ -1,0 +1,12 @@
+# dsh-code-outline bundle patch
+#
+# 这个文件是包清单里的 dsh.bundle.patch 层：`dsh plugin --profile <name> add <本目录>`
+# 安装后，profile 启动时会把下面这一行插件塞进 loader 树。
+#
+# - 宿主半：lib/index.js（注册 /api/code-search/* 路由，做文件名/内容检索与文件读取）
+# - 浏览器半：package.json 的 dsh.client 声明 + exports["./client"]，由 Web GUI 加载
+- insert:
+    - id: code-outline
+      name: 'dsh-code-outline'
+
+
