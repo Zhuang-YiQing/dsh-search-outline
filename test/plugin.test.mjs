@@ -90,7 +90,7 @@ test('GET /ping 返回存活信息', async () => {
   const result = await call({ method: 'GET', url: '/api/code-search/ping' })
   assert.equal(result.status, 200)
   assert.equal(result.data.ok, true)
-  assert.equal(result.data.plugin, 'dsh-code-outline')
+  assert.equal(result.data.plugin, 'dsh-search-outline')
 })
 
 test('POST /search 文件名模式', async () => {

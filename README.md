@@ -1,4 +1,4 @@
-# dsh-code-outline
+# dsh-search-outline
 
 DSH（DeepSeek Harness）右栏 **文件预览增强**插件：形态和 code-nav 一样 ——
 **接管 better-sidebar 的文件预览**，在预览内部直接给：
@@ -59,16 +59,16 @@ pwsh -File scripts/install.ps1 -ProfileName web         # 或指定 profile
 ### 方式 B：官方 CLI
 
 ```powershell
-dsh plugin --profile desktop add link:D:/dsh/myplugin/dsh-code-search
+dsh plugin --profile desktop add link:D:/dsh/myplugin/dsh-search-outline
 ```
 
 走这条通道时**不要**再用方式 A 的挂载行（插件自带的 `dsh.bundle.patch` 会挂载，双挂载会报重复 id）。
 
 ### 方式 C：手动
 
-1. 建目录联接（同方式 A 的第一步，目录名用 `dsh-code-outline`）；
+1. 建目录联接（同方式 A 的第一步，目录名用 `dsh-search-outline`）；
 2. 编辑 `~/.dsh/profiles/desktop/package.json`：`dependencies` 加
-   `"dsh-code-outline": "link:D:/dsh/myplugin/dsh-code-search"`，`dsh.profile.bundles` 末尾加 `"dsh-code-outline"`；
+   `"dsh-search-outline": "link:D:/dsh/myplugin/dsh-search-outline"`，`dsh.profile.bundles` 末尾加 `"dsh-search-outline"`；
 3. 在 profile 目录跑一次 `pnpm install`；
 4. 重启 DSH，硬刷新浏览器。
 

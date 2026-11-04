@@ -76,7 +76,7 @@ if ($text -notmatch [regex]::Escape($markerStart)) {
 
 $markerStart
 - insert:
-    - id: code-search
+    - id: search-outline
       name: '$pkgName'
 $markerEnd
 
@@ -90,4 +90,6 @@ $markerEnd
 Write-Host "已接入：$linkPath -> $repo"
 Write-Host ''
 Write-Host '下一步：重启 DSH（不是刷新页面），然后硬刷新浏览器（Ctrl+Shift+R）。'
-Write-Host '右栏标题栏的 ＋ → 选「搜索」；文件视图里 Ctrl+F 是文件内查找。'
+Write-Host '（可选）到设置 →「侧边卡片」→「文件预览」确认「大纲预览」卡片是开着的；'
+Write-Host '这个卡片就是本插件，关掉它会回退到 better-sidebar 自带查看器。'
+

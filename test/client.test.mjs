@@ -53,8 +53,8 @@ function fakeService(registered) {
 }
 
 test('bundle 形状：name / inject / apply', () => {
-  assert.equal(captured.id, 'dsh-code-outline')
-  assert.equal(mod.name, 'dsh-code-outline')
+  assert.equal(captured.id, 'dsh-search-outline')
+  assert.equal(mod.name, 'dsh-search-outline')
   assert.deepEqual(mod.inject, [])
   assert.equal(typeof mod.apply, 'function')
 })
@@ -71,7 +71,7 @@ test('apply：注册文件预览器（接管 better-sidebar 预览）', () => {
   mod.apply(fakeCtx)
   assert.equal(registered.length, 1)
   const spec = registered[0]
-  assert.equal(spec.id, 'dsh-code-outline:viewer')
+  assert.equal(spec.id, 'dsh-search-outline:viewer')
   assert.equal(spec.priority, 50)
   assert.equal(spec.fetchStrategy, 'fsRead')
   assert.equal(typeof spec.title(), 'string')
