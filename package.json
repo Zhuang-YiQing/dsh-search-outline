@@ -1,7 +1,7 @@
 {
   "name": "dsh-search-outline",
-  "version": "0.3.0",
-  "description": "DSH 文件预览增强：接管 better-sidebar 预览，内置 Ctrl+F 查找条（正则 / 区分大小写 / 命中高亮）与结构大纲（Java / JS / TS / Python / HTML 的类 / 方法 / 变量 / 元素），所有文本格式可搜。",
+  "version": "0.4.0",
+  "description": "DSH 文件预览增强：接管 better-sidebar 预览，内置 Ctrl+F 查找条（正则 / 区分大小写 / 命中高亮）、结构大纲（Java / JS / TS / Python / HTML 的类 / 方法 / 变量 / 元素），并支持选中文本右键加入对话；所有文本格式可搜。",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Zhuang-YiQing/dsh-search-outline.git"

@@ -466,6 +466,190 @@ test('预览组件：非 Java/JS/Python 不出结构面板、二进制提示、�
   assert.equal(childrenOf(blankEmpty)[0], '空文件')
 })
 
+test('选区标题：工作区相对路径 + 行范围', () => {
+  assert.equal(helpers.relativePath('/work/app', '/work/app/src/a.js'), 'src/a.js')
+  assert.equal(helpers.relativePath('D:\\work\\app', 'D:\\work\\app\\src\\a.js'), 'src/a.js')
+  assert.equal(helpers.relativePath('', '/absolute/a.js'), '/absolute/a.js')
+  assert.equal(helpers.relativePath('/work/app', '/other/a.js'), '/other/a.js')
+  assert.equal(helpers.selectionHeader('/w/a.js', '/w', 12, 15), 'a.js:12-15')
+  assert.equal(helpers.selectionHeader('/w/a.js', '/w', 12, 12), 'a.js:12')
+})
+
+test('选区载荷：代码围栏 + 行号标题，超长退化成位置标签', () => {
+  const content = 'line1\nline2\r\nline3\nline4'
+  assert.equal(helpers.selectLines(content, 2, 3), 'line2\nline3')
+
+  const payload = helpers.buildSelectionInsert('/w/src/a.js', '/w', content, 2, 3)
+  assert.equal(payload.label, 'src/a.js:2-3')
+  assert.equal(payload.raw, 'line2\nline3')
+  assert.equal(payload.text, '```src/a.js:2-3\nline2\nline3\n```')
+  assert.equal(payload.truncated, false)
+
+  const big = 'x'.repeat(helpers.SELECTION_LIMIT + 1)
+  const clipped = helpers.buildSelectionInsert('/w/big.txt', '/w', big + '\n', 1, 1)
+  assert.equal(clipped.text, 'big.txt:1')
+  assert.equal(clipped.truncated, true)
+})
+
+test('选区行范围：按 data-line 反查，拖到下一行行首不多算一行', () => {
+  const makeLine = (line) => ({
+    nodeType: 1,
+    getAttribute: (name) => (name === 'data-line' ? String(line) : null),
+    querySelector: () => ({ contains: () => true }),
+    parentElement: null,
+  })
+  const line1 = makeLine(1)
+  const line3 = makeLine(3)
+  const body = { nodeType: 1 }
+
+  assert.deepEqual(
+    helpers.selectionLineRange(body, { startContainer: line1, endContainer: line3, endOffset: 4 }),
+    { start: 1, end: 3 },
+  )
+  assert.deepEqual(
+    helpers.selectionLineRange(body, { startContainer: line1, endContainer: line3, endOffset: 0 }),
+    { start: 1, end: 2 },
+  )
+  // 反向拖选（从下往上）仍然给正序区间
+  assert.deepEqual(
+    helpers.selectionLineRange(body, { startContainer: line3, endContainer: line1, endOffset: 3 }),
+    { start: 1, end: 3 },
+  )
+  assert.equal(helpers.selectionLineRange(body, { startContainer: {}, endContainer: {}, endOffset: 0 }), null)
+})
+
+test('选区行范围：Ctrl+A 全选（边界落在容器本身）退化成首行到末行', () => {
+  const makeLine = (line) => ({
+    nodeType: 1,
+    getAttribute: (name) => (name === 'data-line' ? String(line) : null),
+    querySelector: () => ({ contains: () => true }),
+    parentElement: null,
+  })
+  const lines = [makeLine(1), makeLine(2)]
+  const body = {
+    nodeType: 1,
+    querySelectorAll: (selector) => (selector === '[data-line]' ? lines : []),
+  }
+  assert.deepEqual(
+    helpers.selectionLineRange(body, { startContainer: body, endContainer: body, endOffset: 0 }),
+    { start: 1, end: 2 },
+  )
+  // 空容器说明还没有渲染任何行，不该凭空造出选区
+  assert.equal(helpers.selectionLineRange(
+    { nodeType: 1, querySelectorAll: () => [] },
+    { startContainer: {}, endContainer: {}, endOffset: 0 },
+  ), null)
+})
+
+test('草稿插入位置：chip 在 detect 投影里折成 1 个字符', () => {
+  assert.equal(helpers.leadFor(''), '')
+  assert.equal(helpers.leadFor('abc'), ' ')
+  assert.equal(helpers.leadFor('abc '), '')
+  assert.equal(helpers.appendText('abc', 'X'), 'abc X')
+
+  const draft = 'aa[CHIP01]bb'
+  const occurrences = [{ offset: 2, length: 8 }]
+  assert.equal(helpers.foldClipboardOffset(draft, occurrences, draft.length), draft.length - 7)
+  assert.equal(helpers.foldClipboardOffset(draft, occurrences, 2), 2)
+  assert.equal(helpers.foldClipboardOffset(draft, occurrences, 4), 3)
+  assert.equal(helpers.appendDetectOffset({ draft: 'abc', occurrences: [] }), 3)
+})
+
+test('appendDetectOffset：命令 chip（/goal ）只占 1 个字符', () => {
+  assert.equal(helpers.appendDetectOffset({
+    draft: '/goal hi', phase: 'claimed', claim: { token: '/goal ' }, occurrences: [],
+  }), 3)
+  assert.equal(helpers.appendDetectOffset({
+    draft: '/goal x[CHIP]y',
+    phase: 'claimed',
+    claim: { token: '/goal ' },
+    occurrences: [{ offset: 7, length: 6 }],
+  }), 4)
+})
+
+test('insertSelectionIntoComposer：插引用 chip，并补前置空格', () => {
+  const emitted = []
+  const chips = []
+  let revision = 3
+  let draft = 'hello'
+  const input = {
+    state: { getSnapshot: () => ({ draft: draft, draftRev: revision, occurrences: [] }) },
+    insertReference(chip, span) {
+      chips.push({ chip: chip, span: span })
+      revision += 1
+      return true
+    },
+    setDraft() { throw new Error('chip 通道可用时不该走 setDraft') },
+  }
+  const actx = {
+    emit(name, payload) {
+      emitted.push({ name: name, payload: payload })
+      revision += 1
+      draft += ' '
+    },
+  }
+  const ctx = {
+    get: (name) => (name === 'conversation' ? { input: { for: () => input } } : undefined),
+    sessions: { scope: () => actx },
+  }
+  const payload = helpers.buildSelectionInsert('/w/a.js', '/w', 'one\ntwo', 1, 2)
+  const result = helpers.insertSelectionIntoComposer(ctx, 's1', payload)
+
+  assert.deepEqual(result, { ok: true, mode: 'chip', error: '' })
+  assert.equal(emitted.length, 1)
+  assert.equal(emitted[0].name, 'slash/input-insert-text')
+  assert.equal(emitted[0].payload.text, ' ')
+  assert.deepEqual(emitted[0].payload.span, { draftRev: 3, start: 5, end: 5 })
+  assert.equal(chips.length, 1)
+  assert.equal(chips[0].span.draftRev, 4)
+  assert.equal(chips[0].span.start, 6)
+  assert.equal(chips[0].chip.source, 'reference')
+  assert.equal(chips[0].chip.label, 'a.js:1-2')
+  assert.equal(chips[0].chip.ref, '```a.js:1-2\none\ntwo\n```')
+})
+
+test('insertSelectionIntoComposer：没有 chip 通道时退回纯文本', () => {
+  const drafts = []
+  const input = {
+    state: { getSnapshot: () => ({ draft: 'hi', draftRev: 9, occurrences: [] }) },
+    setDraft(text) { drafts.push(text) },
+  }
+  const ctx = {
+    get: () => ({ input: { for: () => input } }),
+    sessions: { scope: () => ({}) },
+  }
+  const payload = helpers.buildSelectionInsert('/w/a.js', '/w', 'one', 1, 1)
+  assert.deepEqual(helpers.insertSelectionIntoComposer(ctx, 's1', payload), { ok: true, mode: 'text', error: '' })
+  assert.deepEqual(drafts, ['hi ```a.js:1\none\n```'])
+})
+
+test('insertSelectionIntoComposer：没有会话 / 对话服务时报错而不是抛错', () => {
+  const payload = helpers.buildSelectionInsert('/w/a.js', '/w', 'x', 1, 1)
+  assert.deepEqual(helpers.insertSelectionIntoComposer(undefined, 's1', payload),
+    { ok: false, mode: 'none', error: '没有可用的会话' })
+  const noService = { get: () => undefined, sessions: { scope: () => ({}) } }
+  assert.deepEqual(helpers.insertSelectionIntoComposer(noService, 's1', payload),
+    { ok: false, mode: 'none', error: '对话服务不可用' })
+})
+
+test('insertSelectionIntoComposer：insertReference 返回假值但 revision 前进算成功（不重复插）', () => {
+  let revision = 1
+  const input = {
+    state: { getSnapshot: () => ({ draft: 'd', draftRev: revision, occurrences: [] }) },
+    insertReference() {
+      revision += 1
+      return false
+    },
+    setDraft() { throw new Error('revision 已前进，不该再走纯文本兜底') },
+  }
+  const ctx = {
+    get: () => ({ input: { for: () => input } }),
+    sessions: { scope: () => ({ emit: () => { revision += 1 } }) },
+  }
+  const payload = helpers.buildSelectionInsert('/w/a.js', '/w', 'x', 1, 1)
+  assert.deepEqual(helpers.insertSelectionIntoComposer(ctx, 's1', payload), { ok: true, mode: 'chip', error: '' })
+})
+
 
 
 
