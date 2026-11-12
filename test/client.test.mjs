@@ -26,8 +26,22 @@ const fakeReact = {
 await import('../lib/client.js')
 
 const factory = captured.factory
+
+/** 宿主基元取不到时的模块实例（markdown 预览会退化成源码）。 */
+const bareMod = factory((name) => {
+  if (name === 'react') return fakeReact
+  throw new Error('unexpected module: ' + name)
+})
+
+/** 假的 @deepseek-ai/dsh-client-ui-primitives：只需是函数，渲染走假 React。 */
+const fakePrimitives = {
+  MarkdownText: () => null,
+  MarkdownDelegateProvider: () => null,
+}
+
 const mod = factory((name) => {
   if (name === 'react') return fakeReact
+  if (name === '@deepseek-ai/dsh-client-ui-primitives') return fakePrimitives
   throw new Error('unexpected module: ' + name)
 })
 const helpers = mod.__test
@@ -158,14 +172,99 @@ test('renderCodeLines：大文件按锚点行渲染窗口（结构跳转可达�
   const first = propsOf(rows[0])['data-line']
   assert.ok(Number(first) < 2500 && Number(first) >= 2100)
 })
-test('languageOf：识别 java / js / python', () => {
+test('languageOf：识别 java / js / python / html / markdown', () => {
   assert.equal(helpers.languageOf('a/B.java'), 'java')
   assert.equal(helpers.languageOf('a/b.tsx'), 'js')
   assert.equal(helpers.languageOf('x.PY'), 'python')
   assert.equal(helpers.languageOf('index.html'), 'html')
   assert.equal(helpers.languageOf('a.vue'), 'html')
-  assert.equal(helpers.languageOf('README.md'), '')
+  assert.equal(helpers.languageOf('README.md'), 'markdown')
+  assert.equal(helpers.languageOf('notes.MARKDOWN'), 'markdown')
   assert.equal(helpers.languageOf(undefined), '')
+})
+
+test('markdown 大纲：ATX / setext，跳过代码围栏与 front matter', () => {
+  const md = [
+    '---',
+    'title: 手册',
+    '---',
+    '',
+    '# 顶部标题',
+    '',
+    '正文段落',
+    '==========',
+    '',
+    '二级标题',
+    '------',
+    '',
+    '### 三级 ###',
+    '',
+    '```',
+    '# 围栏里的注释不是标题',
+    '```',
+    '',
+    '- 列表项',
+    '  不是标题',
+    '',
+    '#### `带行内代码` 的标题',
+    '',
+  ].join('\n')
+  const symbols = helpers.extractSymbols(md, 'guide.md')
+  assert.deepEqual(symbols.map((s) => s.name + ':' + s.level + ':' + s.line), [
+    '顶部标题:1:5',
+    '正文段落:1:7',
+    '二级标题:2:10',
+    '三级:3:13',
+    '带行内代码 的标题:4:22',
+  ])
+  assert.ok(symbols.every((s) => s.kind === 'heading'))
+  assert.equal(symbols[0].index, 0)
+  assert.equal(symbols[4].index, 4)
+  assert.equal(helpers.symbolKindBadge('heading'), 'H')
+})
+
+test('headingTitle：去掉链接 / 图片 / 行内代码 / 粗体 / 删除线', () => {
+  assert.equal(helpers.headingTitle('[指南](docs/a.md) 用法'), '指南 用法')
+  assert.equal(helpers.headingTitle('![徽标](badge.png) 项目'), '徽标 项目')
+  assert.equal(helpers.headingTitle('**加粗** 与 `代码`'), '加粗 与 代码')
+  assert.equal(helpers.headingTitle('~~旧~~ 新 ~~更旧~~'), '旧 新 更旧')
+  assert.equal(helpers.headingTitle('标题 ##'), '标题')
+})
+
+test('isMarkdownPath / MD_EXTS', () => {
+  assert.equal(helpers.isMarkdownPath('a/b.MD'), true)
+  assert.equal(helpers.isMarkdownPath('a/b.markdown'), true)
+  assert.equal(helpers.isMarkdownPath('a/b.txt'), false)
+  assert.equal(helpers.isMarkdownPath('noext'), false)
+  assert.deepEqual(helpers.MD_EXTS, ['md', 'markdown'])
+})
+
+test('resolveMarkdownTarget：相对路径按当前文件目录展开，去掉片段', () => {
+  assert.equal(helpers.resolveMarkdownTarget('./other.md#L24', '/w/docs/a.md', '/w'), '/w/docs/other.md')
+  assert.equal(helpers.resolveMarkdownTarget('../b.md', '/w/docs/a.md', '/w'), '/w/b.md')
+  assert.equal(helpers.resolveMarkdownTarget('sub/c.md', '/w/docs/a.md', '/w'), '/w/docs/sub/c.md')
+  assert.equal(helpers.resolveMarkdownTarget('/abs/c.md', '/w/docs/a.md', '/w'), '/abs/c.md')
+  assert.equal(helpers.resolveMarkdownTarget('C:/w/c.md', '/w/docs/a.md', '/w'), 'C:/w/c.md')
+  assert.equal(helpers.resolveMarkdownTarget('', '/w/docs/a.md', '/w'), '')
+  assert.equal(helpers.resolveMarkdownTarget('x.md', '', '/w'), '/w/x.md')
+})
+
+test('linesOfText：渲染选区文本映射回源码行（唯一才给行号）', () => {
+  const md = '# 标题\n\n正文 one\n\n# 标题\n\n正文 two\n'
+  assert.deepEqual(helpers.linesOfText(md, '正文 one'), { start: 3, end: 3 })
+  assert.deepEqual(helpers.linesOfText(md, '正文 one\n\n# 标题'), { start: 3, end: 5 })
+  assert.equal(helpers.linesOfText(md, '标题'), null)
+  assert.equal(helpers.linesOfText(md, '不存在的文本'), null)
+  assert.equal(helpers.linesOfText(md, ''), null)
+})
+
+test('选区载荷：预览模式没有行号时标题只带路径，正文用选区文本', () => {
+  const payload = helpers.buildSelectionInsert('/w/docs/a.md', '/w', '# t\nx\n', 0, 0, '渲染出来的文字')
+  assert.equal(payload.header, 'docs/a.md')
+  assert.equal(payload.label, 'docs/a.md')
+  assert.equal(payload.raw, '渲染出来的文字')
+  assert.equal(payload.text, '```docs/a.md\n渲染出来的文字\n```')
+  assert.equal(payload.truncated, false)
 })
 
 test('extractSymbols：Java 的类 / 方法 / 字段', () => {
@@ -414,6 +513,55 @@ test('buildStructure：类节点带成员，未归属的进顶层', () => {
   ])
   assert.deepEqual(tree.classes.map((c) => [c.name, c.members.map((m) => m.name)]), [['A', ['m', 'v']]])
   assert.deepEqual(tree.top.map((s) => s.name), ['free'])
+})
+
+test('预览组件：markdown 文件用宿主 MarkdownText 渲染，并带模式切换按钮', () => {
+  const content = '# 一级\n\n正文\n\n## 二级\n'
+  const view = helpers.FileView({ path: 'docs/guide.md', content, truncated: false, ctx: {}, sessionId: 's1' })
+  const main = childrenOf(view).find((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-main')
+  const wrap = childrenOf(main).find((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-mdwrap')
+  assert.ok(wrap !== undefined)
+  assert.ok(!childrenOf(main).some((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-body'))
+
+  const md = childrenOf(wrap)[0]
+  assert.equal(propsOf(md).className, 'dcs-md')
+  assert.equal(typeof propsOf(md).ref, 'function')
+  assert.equal(typeof propsOf(md).onContextMenu, 'function')
+
+  const provider = childrenOf(md)[0]
+  assert.equal(provider.args[0], fakePrimitives.MarkdownDelegateProvider)
+  assert.equal(typeof propsOf(provider).openFile, 'function')
+  assert.equal(typeof propsOf(provider).openExternalLink, 'function')
+  const renderer = childrenOf(provider)[0]
+  assert.equal(renderer.args[0], fakePrimitives.MarkdownText)
+  assert.equal(propsOf(renderer).text, content)
+  assert.equal(propsOf(renderer).variant, 'body')
+  assert.equal(propsOf(renderer).labels.code.copyLabel, '复制')
+
+  // 结构面板出标题（H），且按钮写着「源码」（当前在预览里，按钮是切回去）
+  const panel = childrenOf(view).find((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-structure')
+  assert.ok(panel !== undefined)
+  const tree = childrenOf(panel).find((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-structure-body')
+  assert.equal(childrenOf(tree).length, 2)
+  assert.equal(propsOf(childrenOf(childrenOf(tree)[0])[0])['data-kind'], 'heading')
+
+  const pill = childrenOf(main).find((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-findpill')
+  assert.ok(pill !== undefined)
+  const mode = childrenOf(pill).find((child) => child !== null && typeof child === 'object' && propsOf(child).title !== undefined && propsOf(child).title.indexOf('源码') !== -1)
+  assert.ok(mode !== undefined)
+  assert.equal(childrenOf(mode)[0], '源码')
+})
+
+test('预览组件：宿主基元缺失时 markdown 退化成源码行', () => {
+  const bare = bareMod.__test
+  const view = bare.FileView({ path: 'docs/guide.md', content: '# 一级\n\n正文\n' })
+  const main = childrenOf(view).find((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-main')
+  const body = childrenOf(main).find((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-body')
+  assert.ok(body !== undefined)
+  assert.ok(!childrenOf(main).some((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-mdwrap'))
+  assert.equal(propsOf(childrenOf(body)[0])['data-line'], '1')
+  const pill = childrenOf(main).find((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-findpill')
+  assert.equal(childrenOf(pill).filter((child) => child !== null).length, 1)
 })
 
 test('预览组件：带内容渲染查找条、右侧结构面板与正文', () => {
