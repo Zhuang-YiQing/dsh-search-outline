@@ -552,6 +552,20 @@ test('预览组件：markdown 文件用宿主 MarkdownText 渲染，并带模式
   assert.equal(childrenOf(mode)[0], '源码')
 })
 
+test('预览组件：带行号打开 markdown 时进源码模式并透传 line', () => {
+  const view = helpers.CodeSearchView({
+    path: 'docs/guide.md',
+    content: '# 一级\n\n正文\n',
+    line: 3,
+    scope: { sessionId: 's1' },
+  })
+  assert.equal(view.args[1].line, 3)
+  const element = view.args[0](view.args[1])
+  const main = childrenOf(element).find((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-main')
+  assert.ok(childrenOf(main).some((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-body'))
+  assert.ok(!childrenOf(main).some((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-mdwrap'))
+})
+
 test('预览组件：宿主基元缺失时 markdown 退化成源码行', () => {
   const bare = bareMod.__test
   const view = bare.FileView({ path: 'docs/guide.md', content: '# 一级\n\n正文\n' })

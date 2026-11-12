@@ -18,7 +18,7 @@ DSH（DeepSeek Harness）右栏 **文件预览增强**插件：形态和 code-na
 - 📑 **Markdown 直接渲染预览**：打开 `.md` / `.markdown` 时默认进渲染预览（宿主自带的
   `MarkdownText` 排版：GFM 表格、代码块、数学、任务列表），右上有「预览 / 源码」切换按钮；
   要改原文、或要用按行高亮的查找时切到源码。链接可点：本地文件链接走 better-sidebar 打开右栏
-  （外链在新窗口打开）；
+  （外链在新窗口打开）；从聊天里的 `#L24` 链接打开 markdown 会直接进源码并跳到该行；
 - 📄 **所有文本格式都能搜**：代码、配置、Markdown、日志、CSV、无扩展名文件……
   不挑扩展名；图片 / PDF / Office 等二进制仍交给 better-sidebar 自己的查看器；
 - ✍️ **选中即加入对话**：在代码区选中一段（可跨行）→ 右键 →「添加到对话」，
@@ -172,7 +172,7 @@ lib/client.js   浏览器半：文件预览器（查找条 + 右侧结构面板 
 lib/index.js    宿主半：/api/code-search/*（当前未使用，保留）
 lib/search.js   宿主半检索核心（当前未使用，保留）
 scripts/        install.ps1 / uninstall.ps1（包名自动取自 package.json，幂等）
-test/           单测：浏览器半 38 项 + 宿主 16 项（search 8 / plugin 8）
+test/           单测：浏览器半 39 项 + 宿主 16 项（search 8 / plugin 8）
 ```
 
 ## 测试
