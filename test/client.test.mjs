@@ -14,11 +14,42 @@ globalThis.window = {
   },
 }
 
+/**
+ * 迷你 hooks 桩：按调用顺序存状态。setter 写入后**重新调用组件**就能拿到新渲染，
+ * 因此可以在无 DOM 的前提下验证「点查找 → 换成高亮视图」这类状态流转。
+ */
+let slots = []
+let cursor = 0
+function resetHooks() {
+  slots = []
+  cursor = 0
+}
+
+/** 每次渲染都把 hook 槽位重新从 0 数一遍（React 的语义）；setter 改过状态后重新渲染即可看到新界面。 */
+function renderView(component, props) {
+  cursor = 0
+  return component(props)
+}
+
 const fakeReact = {
   createElement: (...args) => ({ args }),
-  useState: (value) => [value, () => {}],
-  useRef: (value) => ({ current: value }),
-  useCallback: (fn) => fn,
+  useState: (initial) => {
+    const i = cursor++
+    if (i >= slots.length) slots.push({ value: typeof initial === 'function' ? initial() : initial })
+    return [slots[i].value, (next) => {
+      slots[i].value = typeof next === 'function' ? next(slots[i].value) : next
+    }]
+  },
+  useRef: (initial) => {
+    const i = cursor++
+    if (i >= slots.length) slots.push({ value: { current: initial } })
+    return slots[i].value
+  },
+  useCallback: (fn) => {
+    const i = cursor++
+    if (i >= slots.length) slots.push({ value: fn })
+    return slots[i].value
+  },
   useMemo: (fn) => fn(),
   useEffect: () => undefined,
 }
@@ -27,21 +58,9 @@ await import('../lib/client.js')
 
 const factory = captured.factory
 
-/** 宿主基元取不到时的模块实例（markdown 预览会退化成源码）。 */
-const bareMod = factory((name) => {
-  if (name === 'react') return fakeReact
-  throw new Error('unexpected module: ' + name)
-})
-
-/** 假的 @deepseek-ai/dsh-client-ui-primitives：只需是函数，渲染走假 React。 */
-const fakePrimitives = {
-  MarkdownText: () => null,
-  MarkdownDelegateProvider: () => null,
-}
-
+/** 本插件只 require react（不再 require 宿主基元）。 */
 const mod = factory((name) => {
   if (name === 'react') return fakeReact
-  if (name === '@deepseek-ai/dsh-client-ui-primitives') return fakePrimitives
   throw new Error('unexpected module: ' + name)
 })
 const helpers = mod.__test
@@ -56,14 +75,56 @@ function childrenOf(element) {
   return element.args.slice(2).flat(1)
 }
 
-/** 造一个只带 registerFileViewer 的假 betterSidebar 服务。 */
-function fakeService(registered) {
+/** 按 className 在子节点里找第一个匹配的元素。 */
+function findByClass(element, className) {
+  return childrenOf(element).find((child) => child !== null && typeof child === 'object' && propsOf(child).className === className)
+}
+
+/** better-sidebar 的四个内置查看器（全部 fsRead；component 记下收到的 props）。 */
+const BUILTIN_VIEWERS = [
+  { id: 'markdown', exts: ['md', 'markdown'], fetchStrategy: 'fsRead', component: HostViewer },
+  { id: 'html', exts: ['html', 'htm'], fetchStrategy: 'fsRead', component: HostViewer },
+  { id: 'jsonl', exts: ['jsonl', 'ndjson'], fetchStrategy: 'fsRead', component: HostViewer },
+  { id: 'code', exts: [], priority: -100, fetchStrategy: 'fsRead', component: HostViewer },
+]
+
+/**
+ * 假 better-sidebar 服务：注册表 + 开关 + subscribe。
+ * @param {Array} registered - 收集 registerFileViewer 的规格。
+ * @param {{viewers?: Array, disabled?: string[], subscribed?: Array}} options - 注册表与开关。
+ * @returns {object} 服务对象。
+ */
+function fakeService(registered, options) {
+  const opts = options || {}
+  const viewers = opts.viewers || BUILTIN_VIEWERS
+  const disabled = opts.disabled || []
+  const subscribed = opts.subscribed || []
   return {
     registerFileViewer(spec) {
       registered.push(spec)
       return () => {}
     },
+    getFileViewers() {
+      return viewers.slice()
+    },
+    isViewerEnabled(id) {
+      return disabled.indexOf(id) === -1
+    },
+    subscribe(listener) {
+      subscribed.push(listener)
+      return () => {}
+    },
   }
+}
+
+/** 假宿主查看器组件：把收到的 props 记下来，用来断言转发。 */
+function HostViewer() {
+  return null
+}
+
+/** 造一个能被 CodeSearchView 取到服务的假 ctx。 */
+function fakeCtx(service) {
+  return { get: () => service }
 }
 
 test('bundle 形状：name / inject / apply', () => {
@@ -73,40 +134,114 @@ test('bundle 形状：name / inject / apply', () => {
   assert.equal(typeof mod.apply, 'function')
 })
 
-test('apply：注册文件预览器（接管 better-sidebar 预览）', () => {
+test('apply：叠加层注册（优先级高于内置，只认领可委托的文本扩展名）', () => {
   const registered = []
-  const fakeCtx = {
+  const pluginCtx = {
     effect(fn) { return fn() },
     inject(names, callback) {
       assert.deepEqual(names, ['betterSidebar'])
       return callback({ get: () => fakeService(registered) })
     },
   }
-  mod.apply(fakeCtx)
+  mod.apply(pluginCtx)
   assert.equal(registered.length, 1)
   const spec = registered[0]
   assert.equal(spec.id, 'dsh-search-outline:viewer')
   assert.equal(spec.priority, 50)
   assert.equal(spec.fetchStrategy, 'fsRead')
-  assert.equal(typeof spec.title(), 'string')
+  assert.equal(spec.title(), '大纲预览')
   assert.equal(typeof spec.component, 'function')
+  // 内置 code 查看器是 catch-all，所以全部候选扩展名都能委托 → 全部认领
+  assert.deepEqual(spec.exts, helpers.TEXT_EXTS)
   for (const ext of ['java', 'js', 'ts', 'py', 'md', 'txt', 'log', 'json', 'css', '']) {
-    assert.ok(spec.exts.includes(ext), '应接管 .' + ext)
+    assert.ok(spec.exts.includes(ext), '应叠加 .' + ext)
   }
-  // 二进制类扩展名不能接管（否则图片/PDF 会被当文本渲染）
+  // 二进制类扩展名不在候选里（图片/PDF 仍由 better-sidebar 自己的查看器处理）
   for (const ext of ['png', 'jpg', 'pdf', 'zip', 'docx']) {
-    assert.ok(!spec.exts.includes(ext), '不应接管 .' + ext)
+    assert.ok(!spec.exts.includes(ext), '不应叠加 .' + ext)
   }
 })
 
+test('apply：内置查看器被关掉时，只有它兜底的扩展名让开', () => {
+  const registered = []
+  const pluginCtx = {
+    effect(fn) { return fn() },
+    inject(names, callback) {
+      return callback({ get: () => fakeService(registered, { disabled: ['code'] }) })
+    },
+  }
+  mod.apply(pluginCtx)
+  assert.equal(registered.length, 1)
+  assert.deepEqual(registered[0].exts, ['md', 'markdown', 'jsonl', 'ndjson', 'html', 'htm'])
+})
+
+test('apply：第三方（非 fsRead）查看器不会被委托，仍由内置查看器接手', () => {
+  const registered = []
+  const viewers = BUILTIN_VIEWERS.concat([
+    { id: 'other:viewer', exts: ['md', 'markdown'], priority: 100, fetchStrategy: 'mediaUrl', component: () => null },
+  ])
+  const pluginCtx = {
+    effect(fn) { return fn() },
+    inject(names, callback) {
+      return callback({ get: () => fakeService(registered, { viewers }) })
+    },
+  }
+  mod.apply(pluginCtx)
+  // 第三方查看器不是我们的委托对象（我们只喂 fsRead 的宿主内置查看器），
+  // 所以 md/markdown 仍在我们的认领范围内；宿主那边第三方优先级更高，会由它胜出。
+  assert.ok(registered[0].exts.includes('md'))
+  assert.ok(registered[0].exts.includes('java'))
+  assert.equal(helpers.pickDelegate(fakeService([], { viewers }), 'md', helpers.VIEWER_ID).id, 'markdown')
+  // 只有第三方能认领、且没有内置兜底的扩展名会让开（不认领，交给那个第三方查看器）
+  const imageOnly = fakeService([], { viewers: [{ id: 'img:viewer', exts: ['svg'], priority: 100, fetchStrategy: 'mediaUrl', component: () => null }] })
+  assert.equal(helpers.pickDelegate(imageOnly, 'svg', helpers.VIEWER_ID), null)
+  assert.deepEqual(helpers.claimableExts(imageOnly, ['svg', 'md'], helpers.VIEWER_ID), [])
+})
+
+test('apply：没有任何可委托的查看器时不注册（exts:[] 会被当成 catch-all）', () => {
+  const registered = []
+  const pluginCtx = {
+    effect(fn) { return fn() },
+    inject(names, callback) {
+      return callback({ get: () => fakeService(registered, { viewers: [] }) })
+    },
+  }
+  mod.apply(pluginCtx)
+  assert.equal(registered.length, 0)
+})
+
+test('apply：注册表变化时重算认领范围，不变则不重复注册', () => {
+  const registered = []
+  const subscribed = []
+  const disabled = []
+  const service = fakeService(registered, { disabled, subscribed })
+  const pluginCtx = {
+    effect(fn) { return fn() },
+    inject(names, callback) {
+      return callback({ get: () => service })
+    },
+  }
+  mod.apply(pluginCtx)
+  assert.equal(registered.length, 1)
+  assert.equal(subscribed.length, 1)
+  // 用户关掉 code 内置查看器 → 重算并再注册一次
+  disabled.push('code')
+  subscribed[0]()
+  assert.equal(registered.length, 2)
+  assert.deepEqual(registered[1].exts, ['md', 'markdown', 'jsonl', 'ndjson', 'html', 'htm'])
+  // 再触发一次（结果没变）不应重复注册
+  subscribed[0]()
+  assert.equal(registered.length, 2)
+})
+
 test('apply：better-sidebar 缺失时静默不注册、不抛错', () => {
-  const fakeCtx = {
+  const pluginCtx = {
     effect(fn) { return fn() },
     inject(names, callback) {
       return callback({ get: () => undefined })
     },
   }
-  assert.doesNotThrow(() => mod.apply(fakeCtx))
+  assert.doesNotThrow(() => mod.apply(pluginCtx))
 })
 
 test('splitByRanges：命中区间切段', () => {
@@ -231,22 +366,93 @@ test('headingTitle：去掉链接 / 图片 / 行内代码 / 粗体 / 删除线',
   assert.equal(helpers.headingTitle('标题 ##'), '标题')
 })
 
-test('isMarkdownPath / MD_EXTS', () => {
-  assert.equal(helpers.isMarkdownPath('a/b.MD'), true)
-  assert.equal(helpers.isMarkdownPath('a/b.markdown'), true)
-  assert.equal(helpers.isMarkdownPath('a/b.txt'), false)
-  assert.equal(helpers.isMarkdownPath('noext'), false)
-  assert.deepEqual(helpers.MD_EXTS, ['md', 'markdown'])
+test('extOf：与 better-sidebar 同构的扩展名解析', () => {
+  assert.equal(helpers.extOf('a/b.MD'), 'md')
+  assert.equal(helpers.extOf('a.b.jsonl'), 'jsonl')
+  assert.equal(helpers.extOf('Makefile'), '')
+  assert.equal(helpers.extOf('.hidden'), '')
+  assert.equal(helpers.extOf(''), '')
+  assert.equal(helpers.extOf(undefined), '')
 })
 
-test('resolveMarkdownTarget：相对路径按当前文件目录展开，去掉片段', () => {
-  assert.equal(helpers.resolveMarkdownTarget('./other.md#L24', '/w/docs/a.md', '/w'), '/w/docs/other.md')
-  assert.equal(helpers.resolveMarkdownTarget('../b.md', '/w/docs/a.md', '/w'), '/w/b.md')
-  assert.equal(helpers.resolveMarkdownTarget('sub/c.md', '/w/docs/a.md', '/w'), '/w/docs/sub/c.md')
-  assert.equal(helpers.resolveMarkdownTarget('/abs/c.md', '/w/docs/a.md', '/w'), '/abs/c.md')
-  assert.equal(helpers.resolveMarkdownTarget('C:/w/c.md', '/w/docs/a.md', '/w'), 'C:/w/c.md')
-  assert.equal(helpers.resolveMarkdownTarget('', '/w/docs/a.md', '/w'), '')
-  assert.equal(helpers.resolveMarkdownTarget('x.md', '', '/w'), '/w/x.md')
+test('pickDelegate：选中「没有本插件时宿主会用的那个内置查看器」', () => {
+  const service = fakeService([])
+  assert.equal(helpers.pickDelegate(service, 'md', helpers.VIEWER_ID).id, 'markdown')
+  assert.equal(helpers.pickDelegate(service, 'html', helpers.VIEWER_ID).id, 'html')
+  assert.equal(helpers.pickDelegate(service, 'jsonl', helpers.VIEWER_ID).id, 'jsonl')
+  // 其它文本扩展名走内置 code（catch-all，priority -100）
+  assert.equal(helpers.pickDelegate(service, 'java', helpers.VIEWER_ID).id, 'code')
+  assert.equal(helpers.pickDelegate(service, '', helpers.VIEWER_ID).id, 'code')
+  // 排除自己
+  assert.equal(helpers.pickDelegate(service, 'md', helpers.VIEWER_ID) && helpers.pickDelegate(service, 'md', 'markdown').id, 'code')
+})
+
+test('pickDelegate：不委托第三方插件的查看器，也不委托非 fsRead 的查看器', () => {
+  const thirdParty = fakeService([], {
+    viewers: [
+      { id: 'other:viewer', exts: ['md'], priority: 10, fetchStrategy: 'fsRead', component: () => null },
+      { id: 'code', exts: [], priority: -100, fetchStrategy: 'fsRead', component: () => null },
+    ],
+  })
+  assert.equal(helpers.pickDelegate(thirdParty, 'md', helpers.VIEWER_ID).id, 'code')
+  const media = fakeService([], {
+    viewers: [{ id: 'image', exts: ['svg'], fetchStrategy: 'mediaUrl', component: () => null }],
+  })
+  assert.equal(helpers.pickDelegate(media, 'svg', helpers.VIEWER_ID), null)
+})
+
+test('pickDelegate：用户在侧边卡片里关掉的内置查看器不委托', () => {
+  const service = fakeService([], { disabled: ['code'] })
+  assert.equal(helpers.pickDelegate(service, 'java', helpers.VIEWER_ID), null)
+  assert.equal(helpers.pickDelegate(service, 'md', helpers.VIEWER_ID).id, 'markdown')
+})
+
+test('pickDelegate：服务缺失 / 注册表异常时返回 null 而不是抛错', () => {
+  assert.equal(helpers.pickDelegate(null, 'md', helpers.VIEWER_ID), null)
+  assert.equal(helpers.pickDelegate({ getFileViewers: () => { throw new Error('boom') } }, 'md', helpers.VIEWER_ID), null)
+  assert.equal(helpers.pickDelegate({ getFileViewers: () => null }, 'md', helpers.VIEWER_ID), null)
+})
+
+test('claimableExts：只认领能委托的扩展名', () => {
+  assert.deepEqual(helpers.claimableExts(fakeService([]), ['md', 'java', 'txt'], helpers.VIEWER_ID), ['md', 'java', 'txt'])
+  assert.deepEqual(helpers.claimableExts(fakeService([], { disabled: ['code'] }), ['md', 'java', 'txt'], helpers.VIEWER_ID), ['md'])
+  assert.deepEqual(helpers.claimableExts(null, ['js'], helpers.VIEWER_ID), [])
+})
+
+test('lineTargetInStage：行数对得上按 .cm-line 索引取，对不上退回行号栏文本', () => {
+  const rows = [{ id: 'r1' }, { id: 'r2' }, { id: 'r3' }]
+  const gutter = [{ textContent: ' 1 ' }, { textContent: '2' }, { textContent: '3' }]
+  const stage = (content, cells) => ({
+    querySelector: (sel) => sel === '.cm-content'
+      ? (content ? { querySelectorAll: () => content } : null)
+      : (sel === '.cm-lineNumbers' ? (cells ? { querySelectorAll: () => cells } : null) : null),
+  })
+  assert.equal(helpers.lineTargetInStage(stage(rows, gutter), 2, 3), rows[1])
+  // 源码 5 行但 DOM 只有 3 行（发生了折叠/换行）→ 不可靠，改用行号栏
+  assert.equal(helpers.lineTargetInStage(stage(rows, gutter), 3, 5), gutter[2])
+  assert.equal(helpers.lineTargetInStage(stage(null, null), 1, 3), null)
+  assert.equal(helpers.lineTargetInStage(null, 1, 3), null)
+})
+
+test('headingTargetInStage：按文本匹配（同名用 index），失配按层级兜底', () => {
+  const headings = [
+    { tagName: 'H1', textContent: ' 顶部 ' },
+    { tagName: 'H2', textContent: '小节' },
+    { tagName: 'H2', textContent: '小节' },
+  ]
+  const stage = { querySelectorAll: () => headings }
+  assert.equal(helpers.headingTargetInStage(stage, { name: '顶部', level: 1, index: 0 }), headings[0])
+  assert.equal(helpers.headingTargetInStage(stage, { name: '小节', level: 2, index: 1 }), headings[2])
+  assert.equal(helpers.headingTargetInStage(stage, { name: '不存在', level: 2, index: 0 }), headings[1])
+  assert.equal(helpers.headingTargetInStage({ querySelectorAll: () => [] }, { name: 'x', level: 1, index: 0 }), null)
+})
+
+test('formatSize：字节数转可读字符串', () => {
+  assert.equal(helpers.formatSize(512), '512 B')
+  assert.equal(helpers.formatSize(2048), '2 KB')
+  assert.equal(helpers.formatSize(1536 * 1024), '1.5 MB')
+  assert.equal(helpers.formatSize(undefined), '未知大小')
+  assert.equal(helpers.formatSize(0), '未知大小')
 })
 
 test('linesOfText：渲染选区文本映射回源码行（唯一才给行号）', () => {
@@ -515,117 +721,190 @@ test('buildStructure：类节点带成员，未归属的进顶层', () => {
   assert.deepEqual(tree.top.map((s) => s.name), ['free'])
 })
 
-test('预览组件：markdown 文件用宿主 MarkdownText 渲染，并带模式切换按钮', () => {
-  const content = '# 一级\n\n正文\n\n## 二级\n'
-  const view = helpers.FileView({ path: 'docs/guide.md', content, truncated: false, ctx: {}, sessionId: 's1' })
-  const main = childrenOf(view).find((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-main')
-  const wrap = childrenOf(main).find((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-mdwrap')
-  assert.ok(wrap !== undefined)
-  assert.ok(!childrenOf(main).some((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-body'))
-
-  const md = childrenOf(wrap)[0]
-  assert.equal(propsOf(md).className, 'dcs-md')
-  assert.equal(typeof propsOf(md).ref, 'function')
-  assert.equal(typeof propsOf(md).onContextMenu, 'function')
-
-  const provider = childrenOf(md)[0]
-  assert.equal(provider.args[0], fakePrimitives.MarkdownDelegateProvider)
-  assert.equal(typeof propsOf(provider).openFile, 'function')
-  assert.equal(typeof propsOf(provider).openExternalLink, 'function')
-  const renderer = childrenOf(provider)[0]
-  assert.equal(renderer.args[0], fakePrimitives.MarkdownText)
-  assert.equal(propsOf(renderer).text, content)
-  assert.equal(propsOf(renderer).variant, 'body')
-  assert.equal(propsOf(renderer).labels.code.copyLabel, '复制')
-
-  // 结构面板出标题（H），且按钮写着「源码」（当前在预览里，按钮是切回去）
-  const panel = childrenOf(view).find((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-structure')
-  assert.ok(panel !== undefined)
-  const tree = childrenOf(panel).find((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-structure-body')
-  assert.equal(childrenOf(tree).length, 2)
-  assert.equal(propsOf(childrenOf(childrenOf(tree)[0])[0])['data-kind'], 'heading')
-
-  const pill = childrenOf(main).find((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-findpill')
-  assert.ok(pill !== undefined)
-  const mode = childrenOf(pill).find((child) => child !== null && typeof child === 'object' && propsOf(child).title !== undefined && propsOf(child).title.indexOf('源码') !== -1)
-  assert.ok(mode !== undefined)
-  assert.equal(childrenOf(mode)[0], '源码')
-})
-
-test('预览组件：带行号打开 markdown 时进源码模式并透传 line', () => {
-  const view = helpers.CodeSearchView({
-    path: 'docs/guide.md',
-    content: '# 一级\n\n正文\n',
-    line: 3,
-    scope: { sessionId: 's1' },
-  })
-  assert.equal(view.args[1].line, 3)
-  const element = view.args[0](view.args[1])
-  const main = childrenOf(element).find((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-main')
-  assert.ok(childrenOf(main).some((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-body'))
-  assert.ok(!childrenOf(main).some((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-mdwrap'))
-})
-
-test('预览组件：宿主基元缺失时 markdown 退化成源码行', () => {
-  const bare = bareMod.__test
-  const view = bare.FileView({ path: 'docs/guide.md', content: '# 一级\n\n正文\n' })
-  const main = childrenOf(view).find((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-main')
-  const body = childrenOf(main).find((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-body')
-  assert.ok(body !== undefined)
-  assert.ok(!childrenOf(main).some((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-mdwrap'))
-  assert.equal(propsOf(childrenOf(body)[0])['data-line'], '1')
-  const pill = childrenOf(main).find((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-findpill')
-  assert.equal(childrenOf(pill).filter((child) => child !== null).length, 1)
-})
-
-test('预览组件：带内容渲染查找条、右侧结构面板与正文', () => {
+test('预览外壳：文件本体交回宿主内置 code 查看器，只叠加查找条与结构面板', () => {
+  resetHooks()
   const content = ['public class Demo {', '    private int count;', '    void run() {}', '}', ''].join('\n')
-  const view = helpers.CodeSearchView({
+  const onReload = () => {}
+  const view = renderView(helpers.CodeSearchView, {
     path: 'Demo.java',
     content,
-    truncated: false,
+    title: 'Demo.java',
+    store: { tag: 'host-store' },
+    toolbar: 'host',
+    onReload,
     scope: { sessionId: 's1' },
+    ctx: fakeCtx(fakeService([])),
   })
-  const inner = view.args[0]
-  assert.equal(inner, helpers.FileView)
-  const element = inner(view.args[1])
+  assert.equal(view.args[0], helpers.FileView)
+  assert.equal(view.args[1].delegate.id, 'code')
+  assert.equal(view.args[1].largeFile, null)
+
+  const element = renderView(helpers.FileView, view.args[1])
   assert.equal(propsOf(element).className, 'dcs-root')
-  const children = childrenOf(element)
+  const main = findByClass(element, 'dcs-main')
+  const stage = findByClass(main, 'dcs-stage')
+  assert.ok(stage !== undefined)
+  assert.equal(typeof propsOf(stage).onContextMenu, 'function')
+  assert.equal(typeof propsOf(stage).ref, 'function')
+  // 默认状态下不该出现我们自己的高亮视图（编辑 / 保存 / 预览还是宿主的）
+  assert.ok(!childrenOf(main).some((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-body'))
 
-  const main = children.find((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-main')
-  assert.ok(main !== undefined)
-  const mainChildren = childrenOf(main)
-  assert.ok(mainChildren.some((child) => child !== null && typeof child === 'object' && (propsOf(child).className === 'dcs-findbar' || propsOf(child).className === 'dcs-findpill')))
-  const body = mainChildren.find((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-body')
-  assert.ok(body !== undefined)
-  assert.equal(propsOf(childrenOf(body)[0])['data-line'], '1')
+  const host = childrenOf(stage)[0]
+  assert.equal(host.args[0], HostViewer) // 文件本体交回宿主内置查看器渲染
+  const received = host.args[1]
+  assert.equal(received.viewerId, 'code') // 覆盖成被委托查看器的 id
+  assert.notEqual(received.viewerId, helpers.VIEWER_ID)
+  assert.equal(received.path, 'Demo.java')
+  assert.equal(received.content, content)
+  assert.equal(received.title, 'Demo.java')
+  assert.equal(received.store, view.args[1].viewerProps.store)
+  assert.equal(received.toolbar, 'host')
+  assert.equal(received.onReload, onReload)
 
-  const panel = children.find((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-structure')
-  assert.ok(panel !== undefined)
-  const panelChildren = childrenOf(panel)
-  const tree = panelChildren.find((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-structure-body')
-  assert.ok(tree !== undefined)
-  // 类行 + 字段 + 方法 = 3 行
+  assert.ok(findByClass(main, 'dcs-findbar') !== undefined || findByClass(main, 'dcs-findpill') !== undefined)
+  // 叠加层用内联 top（宿主查看器自带工具条，挂载后会量出高度往下挪；没量到时兜底 8px）
+  assert.equal(propsOf(findByClass(main, 'dcs-findpill')).style.top, '8px')
+  const panel = findByClass(element, 'dcs-structure')
+  const tree = findByClass(panel, 'dcs-structure-body')
   assert.equal(childrenOf(tree).length, 3)
   assert.equal(propsOf(childrenOf(tree)[0]).className, 'dcs-tree-row')
 })
 
-test('预览组件：非 Java/JS/Python 不出结构面板、二进制提示、空文件提示', () => {
-  const text = helpers.CodeSearchView({ path: 'a.txt', content: 'hello\nworld\n' })
-  const textChildren = childrenOf(text.args[0](text.args[1]))
-  assert.ok(!textChildren.some((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-structure'))
+test('预览外壳：markdown 交回内置 markdown 查看器（渲染预览由宿主负责）', () => {
+  resetHooks()
+  const content = '# 一级\n\n正文\n\n## 二级\n'
+  const view = renderView(helpers.CodeSearchView, {
+    path: 'docs/guide.md',
+    content,
+    scope: { sessionId: 's1' },
+    ctx: fakeCtx(fakeService([])),
+  })
+  assert.equal(view.args[1].delegate.id, 'markdown')
+  const element = renderView(helpers.FileView, view.args[1])
+  const stage = findByClass(findByClass(element, 'dcs-main'), 'dcs-stage')
+  assert.equal(childrenOf(stage)[0].args[1].viewerId, 'markdown')
+  assert.equal(childrenOf(stage)[0].args[0], HostViewer)
 
-  const binary = helpers.FileView({ path: 'a.bin', content: 'a\u0000b' })
-  const binaryMain = childrenOf(binary).find((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-main')
-  const binaryBody = childrenOf(binaryMain).find((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-body')
-  const binaryEmpty = childrenOf(binaryBody).find((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-empty')
-  assert.equal(childrenOf(binaryEmpty)[0], '二进制文件，无法预览')
+  // 结构面板仍然出标题大纲（H）
+  const panel = findByClass(element, 'dcs-structure')
+  const tree = findByClass(panel, 'dcs-structure-body')
+  assert.equal(childrenOf(tree).length, 2)
+  assert.equal(propsOf(childrenOf(childrenOf(tree)[0])[0])['data-kind'], 'heading')
+  assert.equal(helpers.symbolKindBadge('heading'), 'H')
+})
 
-  const blank = helpers.FileView({ path: 'a.txt', content: '' })
-  const blankMain = childrenOf(blank).find((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-main')
-  const blankBody = childrenOf(blankMain).find((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-body')
-  const blankEmpty = childrenOf(blankBody).find((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-empty')
-  assert.equal(childrenOf(blankEmpty)[0], '空文件')
+
+test('预览外壳：带行号打开（聊天里的 #L24 链接）把 line 交给宿主查看器', () => {
+  resetHooks()
+  const view = renderView(helpers.CodeSearchView, {
+    path: 'docs/guide.md',
+    content: '# 一级\n\n正文\n',
+    line: 3,
+    scope: { sessionId: 's1' },
+    ctx: fakeCtx(fakeService([])),
+  })
+  assert.equal(view.args[1].line, 3)
+  const element = renderView(helpers.FileView, view.args[1])
+  const main = findByClass(element, 'dcs-main')
+  assert.ok(findByClass(main, 'dcs-stage') !== undefined)
+  assert.ok(!findByClass(main, 'dcs-body'))
+  assert.equal(childrenOf(findByClass(main, 'dcs-stage'))[0].args[1].line, 3)
+  assert.equal(childrenOf(findByClass(main, 'dcs-stage'))[0].args[1].onLineConsumed, undefined)
+})
+
+test('预览外壳：没有可委托的查看器时给提示，而不是空白', () => {
+  resetHooks()
+  const view = renderView(helpers.CodeSearchView, {
+    path: 'a.java',
+    content: 'class A {}\n',
+    scope: { sessionId: 's1' },
+    ctx: fakeCtx(fakeService([], { viewers: [] })),
+  })
+  assert.equal(view.args[1].delegate, null)
+  const main = findByClass(renderView(helpers.FileView, view.args[1]), 'dcs-main')
+  const stage = findByClass(main, 'dcs-stage')
+  const empty = findByClass(stage, 'dcs-empty')
+  assert.ok(empty !== undefined)
+  assert.ok(String(childrenOf(empty)[0]).indexOf('没有可委托的宿主查看器') === 0)
+})
+
+test('预览外壳：点「查找」才换成我们自己的只读高亮视图，× 退回宿主查看器', () => {
+  resetHooks()
+  const props = {
+    path: 'a.js',
+    content: 'one\ntwo\nthree\n',
+    scope: { sessionId: 's1' },
+    ctx: fakeCtx(fakeService([])),
+  }
+  const first = renderView(helpers.FileView, props)
+  const pill = findByClass(findByClass(first, 'dcs-main'), 'dcs-findpill')
+  const pillButton = childrenOf(pill)[0]
+  assert.equal(childrenOf(pillButton)[0], '查找')
+  assert.ok(String(propsOf(pillButton).title).indexOf('打开高亮查找') !== -1)
+  propsOf(pillButton).onClick()
+
+  const second = renderView(helpers.FileView, props)
+  const main = findByClass(second, 'dcs-main')
+  const body = findByClass(main, 'dcs-body')
+  assert.ok(body !== undefined)
+  assert.ok(!findByClass(main, 'dcs-stage'))
+  assert.equal(propsOf(childrenOf(body)[0])['data-line'], '1')
+  assert.equal(propsOf(body).tabIndex, 0)
+  assert.equal(typeof propsOf(body).onContextMenu, 'function')
+  const note = findByClass(body, 'dcs-note')
+  assert.equal(childrenOf(note)[0], '高亮查找是只读视图；按 × 或 Esc 回到编辑 / 预览。')
+
+  const bar = findByClass(main, 'dcs-findbar')
+  const close = childrenOf(bar).find((child) => child !== null && typeof child === 'object' && String(child.args[1].title || '').indexOf('退出高亮查找') !== -1)
+  assert.ok(close !== undefined)
+  propsOf(close).onClick()
+
+  const third = renderView(helpers.FileView, props)
+  const back = findByClass(third, 'dcs-main')
+  assert.ok(findByClass(back, 'dcs-stage') !== undefined)
+  assert.ok(!findByClass(back, 'dcs-body'))
+})
+
+test('预览外壳：查找视图里超大文件与二进制给出提示', () => {
+  resetHooks()
+  const bigProps = {
+    path: 'big.log',
+    content: '',
+    largeFile: { size: 2048 },
+    scope: { sessionId: 's1' },
+    ctx: fakeCtx(fakeService([])),
+  }
+  propsOf(childrenOf(findByClass(findByClass(renderView(helpers.FileView, bigProps), 'dcs-main'), 'dcs-findpill'))[0]).onClick()
+  const bigBody = findByClass(findByClass(renderView(helpers.FileView, bigProps), 'dcs-main'), 'dcs-body')
+  assert.equal(childrenOf(findByClass(bigBody, 'dcs-empty'))[0],
+    '超大文件（2 KB）：宿主只加载分页片段，高亮查找不可用，请在编辑器里用 CodeMirror 自带的搜索。')
+  assert.ok(!findByClass(bigBody, 'dcs-note'))
+
+  resetHooks()
+  const binProps = { path: 'a.bin', content: 'a' + String.fromCharCode(0) + 'b', scope: { sessionId: 's1' }, ctx: fakeCtx(fakeService([])) }
+  propsOf(childrenOf(findByClass(findByClass(renderView(helpers.FileView, binProps), 'dcs-main'), 'dcs-findpill'))[0]).onClick()
+  const binBody = findByClass(findByClass(renderView(helpers.FileView, binProps), 'dcs-main'), 'dcs-body')
+  assert.equal(childrenOf(findByClass(binBody, 'dcs-empty'))[0], '二进制文件，无法预览')
+})
+
+test('预览外壳：空文件在查找视图里给提示（编辑交回宿主）', () => {
+  resetHooks()
+  const props = { path: 'a.txt', content: '', scope: { sessionId: 's1' }, ctx: fakeCtx(fakeService([])) }
+  propsOf(childrenOf(findByClass(findByClass(renderView(helpers.FileView, props), 'dcs-main'), 'dcs-findpill'))[0]).onClick()
+  const body = findByClass(findByClass(renderView(helpers.FileView, props), 'dcs-main'), 'dcs-body')
+  assert.equal(childrenOf(findByClass(body, 'dcs-empty'))[0], '空文件')
+})
+
+test('预览外壳：非 Java/JS/Python/HTML/Markdown 不出结构面板', () => {
+  resetHooks()
+  const view = renderView(helpers.FileView, {
+    path: 'a.txt',
+    content: 'hello\nworld\n',
+    scope: { sessionId: 's1' },
+    ctx: fakeCtx(fakeService([])),
+  })
+  assert.ok(!childrenOf(view).some((child) => child !== null && typeof child === 'object' && propsOf(child).className === 'dcs-structure'))
+  assert.ok(findByClass(findByClass(view, 'dcs-main'), 'dcs-stage') !== undefined)
 })
 
 test('选区标题：工作区相对路径 + 行范围', () => {
@@ -811,7 +1090,6 @@ test('insertSelectionIntoComposer：insertReference 返回假值但 revision 前
   const payload = helpers.buildSelectionInsert('/w/a.js', '/w', 'x', 1, 1)
   assert.deepEqual(helpers.insertSelectionIntoComposer(ctx, 's1', payload), { ok: true, mode: 'chip', error: '' })
 })
-
 
 
 
