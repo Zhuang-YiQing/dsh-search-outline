@@ -1,6 +1,6 @@
 {
   "name": "dsh-search-outline",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "DSH 文件预览增强：在 better-sidebar 的内置查看器上叠加 Ctrl+F 查找条（正则 / 区分大小写 / 命中高亮）、结构大纲（Java / JS / TS / Python / HTML 的类 / 方法 / 变量 / 元素、Markdown 标题）、选区右键加入对话；文件本体仍由宿主渲染与编辑，不顶掉内置的 Markdown 预览、保存、git gutter、超大文件分页。",
   "repository": {
     "type": "git",

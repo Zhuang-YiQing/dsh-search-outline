@@ -12,6 +12,8 @@ globalThis.window = {
   __ModuleLoader__: {
     load: (definition) => { captured = definition },
   },
+  // scrollableIn 找预览滚动容器时要用它；桩里直接把元素自己的 style 当计算样式
+  getComputedStyle: (element) => (element && element.style) || {},
 }
 
 /**
@@ -453,6 +455,29 @@ test('formatSize：字节数转可读字符串', () => {
   assert.equal(helpers.formatSize(1536 * 1024), '1.5 MB')
   assert.equal(helpers.formatSize(undefined), '未知大小')
   assert.equal(helpers.formatSize(0), '未知大小')
+})
+
+test('scrollableIn：编辑器认 .cm-scroller，渲染预览认带 overflow 的滚动容器', () => {
+  const cm = { scrollHeight: 4000, clientHeight: 800, scrollTop: 1600 }
+  assert.equal(helpers.scrollableIn({ querySelector: (sel) => (sel === '.cm-scroller' ? cm : null), querySelectorAll: () => [] }), cm)
+
+  const preview = { scrollHeight: 3000, clientHeight: 600, scrollTop: 1200, style: { overflowY: 'auto' } }
+  const flat = { scrollHeight: 100, clientHeight: 100, style: { overflowY: 'visible' } }
+  assert.equal(helpers.scrollableIn({ querySelector: () => null, querySelectorAll: () => [flat, preview] }), preview)
+
+  assert.equal(helpers.scrollableIn({ querySelector: () => null, querySelectorAll: () => [] }), null)
+  assert.equal(helpers.scrollableIn(null), null)
+})
+
+test('anchorFromRatio：把宿主滚动比例换成浮层的锚点行', () => {
+  assert.equal(helpers.anchorFromRatio(null, 100), 0)
+  assert.equal(helpers.anchorFromRatio(0, 100), 1)
+  assert.equal(helpers.anchorFromRatio(1, 100), 100)
+  assert.equal(helpers.anchorFromRatio(0.5, 100), 51)
+  assert.equal(helpers.anchorFromRatio(2, 10), 10)
+  assert.equal(helpers.anchorFromRatio(-1, 10), 1)
+  assert.equal(helpers.anchorFromRatio(0.5, 0), 0)
+  assert.equal(helpers.anchorFromRatio('abc', 100), 0)
 })
 
 test('linesOfText：渲染选区文本映射回源码行（唯一才给行号）', () => {
