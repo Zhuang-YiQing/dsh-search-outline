@@ -828,7 +828,7 @@ test('预览外壳：没有可委托的查看器时给提示，而不是空白',
   assert.ok(String(childrenOf(empty)[0]).indexOf('没有可委托的宿主查看器') === 0)
 })
 
-test('预览外壳：点「查找」才换成我们自己的只读高亮视图，× 退回宿主查看器', () => {
+test('预览外壳：点「查找」才盖上我们自己的只读高亮浮层，× 退回宿主查看器', () => {
   resetHooks()
   const props = {
     path: 'a.js',
@@ -836,33 +836,41 @@ test('预览外壳：点「查找」才换成我们自己的只读高亮视图�
     scope: { sessionId: 's1' },
     ctx: fakeCtx(fakeService([])),
   }
-  const first = renderView(helpers.FileView, props)
+  const viewProps = renderView(helpers.CodeSearchView, props).args[1]
+  const first = renderView(helpers.FileView, viewProps)
   const pill = findByClass(findByClass(first, 'dcs-main'), 'dcs-findpill')
   const pillButton = childrenOf(pill)[0]
   assert.equal(childrenOf(pillButton)[0], '查找')
   assert.ok(String(propsOf(pillButton).title).indexOf('打开高亮查找') !== -1)
   propsOf(pillButton).onClick()
 
-  const second = renderView(helpers.FileView, props)
+  const second = renderView(helpers.FileView, viewProps)
   const main = findByClass(second, 'dcs-main')
-  const body = findByClass(main, 'dcs-body')
+  const overlay = findByClass(main, 'dcs-findview')
+  assert.ok(overlay !== undefined)
+  // 宿主的查看器始终挂载：查找只是盖在它上面的浮层，未保存的编辑不会丢
+  const stage = findByClass(main, 'dcs-stage')
+  assert.ok(stage !== undefined)
+  assert.equal(childrenOf(stage)[0].args[0], HostViewer)
+  assert.equal(childrenOf(stage)[0].args[1].viewerId, 'code')
+  const body = findByClass(overlay, 'dcs-body')
   assert.ok(body !== undefined)
-  assert.ok(!findByClass(main, 'dcs-stage'))
   assert.equal(propsOf(childrenOf(body)[0])['data-line'], '1')
   assert.equal(propsOf(body).tabIndex, 0)
   assert.equal(typeof propsOf(body).onContextMenu, 'function')
-  const note = findByClass(body, 'dcs-note')
-  assert.equal(childrenOf(note)[0], '高亮查找是只读视图；按 × 或 Esc 回到编辑 / 预览。')
+  const note = findByClass(overlay, 'dcs-note')
+  assert.ok(String(childrenOf(note)[0]).indexOf('高亮查找是盖在宿主视图上的只读浮层') === 0)
 
   const bar = findByClass(main, 'dcs-findbar')
   const close = childrenOf(bar).find((child) => child !== null && typeof child === 'object' && String(child.args[1].title || '').indexOf('退出高亮查找') !== -1)
   assert.ok(close !== undefined)
   propsOf(close).onClick()
 
-  const third = renderView(helpers.FileView, props)
+  const third = renderView(helpers.FileView, viewProps)
   const back = findByClass(third, 'dcs-main')
   assert.ok(findByClass(back, 'dcs-stage') !== undefined)
-  assert.ok(!findByClass(back, 'dcs-body'))
+  assert.ok(!findByClass(back, 'dcs-findview'))
+  assert.ok(!findByClass(findByClass(back, 'dcs-stage'), 'dcs-body'))
 })
 
 test('预览外壳：查找视图里超大文件与二进制给出提示', () => {
@@ -875,24 +883,32 @@ test('预览外壳：查找视图里超大文件与二进制给出提示', () =>
     ctx: fakeCtx(fakeService([])),
   }
   propsOf(childrenOf(findByClass(findByClass(renderView(helpers.FileView, bigProps), 'dcs-main'), 'dcs-findpill'))[0]).onClick()
-  const bigBody = findByClass(findByClass(renderView(helpers.FileView, bigProps), 'dcs-main'), 'dcs-body')
+  const bigMain = findByClass(renderView(helpers.FileView, bigProps), 'dcs-main')
+  const bigView = findByClass(bigMain, 'dcs-findview')
+  const bigBody = findByClass(bigView, 'dcs-body')
   assert.equal(childrenOf(findByClass(bigBody, 'dcs-empty'))[0],
     '超大文件（2 KB）：宿主只加载分页片段，高亮查找不可用，请在编辑器里用 CodeMirror 自带的搜索。')
-  assert.ok(!findByClass(bigBody, 'dcs-note'))
+  assert.ok(!findByClass(bigView, 'dcs-note'))
+  assert.ok(findByClass(bigMain, 'dcs-stage') !== undefined)
 
   resetHooks()
   const binProps = { path: 'a.bin', content: 'a' + String.fromCharCode(0) + 'b', scope: { sessionId: 's1' }, ctx: fakeCtx(fakeService([])) }
   propsOf(childrenOf(findByClass(findByClass(renderView(helpers.FileView, binProps), 'dcs-main'), 'dcs-findpill'))[0]).onClick()
-  const binBody = findByClass(findByClass(renderView(helpers.FileView, binProps), 'dcs-main'), 'dcs-body')
+  const binMain = findByClass(renderView(helpers.FileView, binProps), 'dcs-main')
+  const binView = findByClass(binMain, 'dcs-findview')
+  const binBody = findByClass(binView, 'dcs-body')
   assert.equal(childrenOf(findByClass(binBody, 'dcs-empty'))[0], '二进制文件，无法预览')
+  assert.ok(findByClass(binMain, 'dcs-stage') !== undefined)
 })
 
 test('预览外壳：空文件在查找视图里给提示（编辑交回宿主）', () => {
   resetHooks()
   const props = { path: 'a.txt', content: '', scope: { sessionId: 's1' }, ctx: fakeCtx(fakeService([])) }
   propsOf(childrenOf(findByClass(findByClass(renderView(helpers.FileView, props), 'dcs-main'), 'dcs-findpill'))[0]).onClick()
-  const body = findByClass(findByClass(renderView(helpers.FileView, props), 'dcs-main'), 'dcs-body')
+  const emptyView = findByClass(findByClass(renderView(helpers.FileView, props), 'dcs-main'), 'dcs-findview')
+  const body = findByClass(emptyView, 'dcs-body')
   assert.equal(childrenOf(findByClass(body, 'dcs-empty'))[0], '空文件')
+  assert.ok(findByClass(findByClass(renderView(helpers.FileView, props), 'dcs-main'), 'dcs-stage') !== undefined)
 })
 
 test('预览外壳：非 Java/JS/Python/HTML/Markdown 不出结构面板', () => {
